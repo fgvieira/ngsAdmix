@@ -9,4 +9,4 @@ ngsAdmix: ngsAdmix.cpp
 	$(CXX) $(FLAGS) ngsAdmix.cpp -o ngsAdmix -lz -lpthread
 
 clean:
-	rm  -f *.o ngsAdmix
+	rm -f *.o ngsAdmix
