@@ -1,5 +1,8 @@
 /*
   log:
+
+  ngsAdmix33: implemented supervised algorithm
+  g++ ngsAdmix33.cpp -lz -lpthread  -O3 -o ngsAdmix
   ngsAdmix32: program now works on osx
   icpc ngsAdmix32.cpp -lz -lpthread  -O3 -o ngsAdmix32
 
@@ -35,7 +38,7 @@
   version 18 line er soed
   cutoff for genotype calling -cut (only works when compiled with -DDO_MIS)
   call genotypes (maxLike, hweLike) and update freq estimate before filtering - because this is what people will do
-  icpc ngsAdmix18.cpp -lz -lpthread  -O3 -o ngsAdmix18
+  icpc ngsAdmix18.cpp -lz -lpthread -O3 -o ngsAdmix18
   icpc ngsAdmix18.cpp -lz -lpthread -DDO_MIS -O3 -o ngsAdmix18mis
   
   //version 17
@@ -81,6 +84,10 @@
 #include <signal.h>
 #include <vector>
 #include <sys/stat.h>
+#include <map>
+#include <ctype.h>
+#include <string>
+#include <algorithm>
 
 //This is taken from here:
 //http://blog.albertarmea.com/post/47089939939/using-pthread-barrier-on-mac-os-x
@@ -187,6 +194,7 @@ typedef struct{
   double **genos;
   int nInd;
   int nSites;
+  int *fixInd;
   double lres;//this is the likelihood for a block of data. total likelihood is sum of lres.
 }pars;
 
@@ -291,10 +299,8 @@ void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, i
     for(int j=nSites_start;j<nSites_stop;j++){
       double sumAG[K];
       double sumBG[K];
-      for(int k=0;k<K;k++){ //time killar
-	sumAG[k]=0;
-	sumBG[k]=0;
-      }
+      for(int k=0;k<K;k++) //time killar
+	sumAG[k] = sumBG[k] = 0;
 	
       for(int i=0;i<nInd;i++){
 #ifdef DO_MIS
@@ -305,37 +311,38 @@ void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, i
 	//	else{
 #endif
 	  double fpart=0;
-	  for(int k=0;k<K;k++){ //time killar
+	  for(int k=0;k<K;k++) //time killar
 	    fpart += F[j][k] * Q[i][k];
-	  }
+
 	  fpart=1-fpart;
+	  if(isnan(fpart))
+	    printf("WARNING: NaN found at Site %d and Ind %d\n", j, i);
 	  double pp0=fpart*fpart*        genos[j][3*i+0];
 	  double pp1=2*(1-fpart)*fpart*  genos[j][3*i+1];
 	  double pp2=(1-fpart)*(1-fpart)*genos[j][3*i+2];
 	  double sum=pp0+pp1+pp2;
 	  double expGG =(pp1+2*pp2)/sum;//range 0-2, this is the expected genotype
-	
 	 
 	  for(int k=0;k<K;k++){
 	    prodA[thread][i][k] += expGG/(1-fpart) * F[j][k]; //proteckMe
 	    prodB[thread][i][k] += (2-expGG)/fpart *(1- F[j][k]); //proteckMe
 	    sumAG[k] += expGG/(1-fpart) * Q[i][k]; //time killar
 	    sumBG[k] += (2-expGG)/fpart * Q[i][k];//time killar
-  
 	  }
 #ifdef DO_MIS
 	}
 #endif
       }
+
       for(int k=0;k<K;k++){
 	sumAG[k] *= F[j][k];
 	sumBG[k] *= (1-F[j][k]);
-	F_1[j][k]=sumAG[k]/(sumAG[k]+sumBG[k]);
-      }
+	F_1[j][k] = sumAG[k]/(sumAG[k]+sumBG[k]);
 
-    
-    }
-  
+	if(isnan(F_1[j][k]))
+	  printf("WARNING: NaN found at Site %d and K %d: %f %f (%f %f)\n", j, k, F[j][k], F_1[j][k], sumAG, sumBG);
+      }
+   }
 }
 
 
@@ -347,16 +354,13 @@ void map2domainF(double** F, int nSites_start,int nSites_stop, int K){
        F[s][k] = errTol;
      if(F[s][k]>1-errTol)
        F[s][k] =1-errTol;
-     
    }
-
-
 }
 
 
 
 void map2domainQ(double** Q, int nInd, int K){
-  for(int i=0;i<nInd;i++){  
+  for(int i=0;i<nInd;i++){
     double sum=0;
     for(int k=0;k<K;k++){
       if(Q[i][k]<errTol)
@@ -368,11 +372,10 @@ void map2domainQ(double** Q, int nInd, int K){
     for(int k=0;k<K;k++)
       Q[i][k]=Q[i][k]/sum;
   }
- 
 }
 
 
-void updateQ(double** Q_0, double** F_0, int nSites_start,int nSites_stop, int nInd, int K,double **Q_1,int totSites,int startI,int stopI,char **keeps,double ***prodA,double ***prodB,int nThreads){
+void updateQ(double** Q_0, double** F_0, int* fixInd, int nSites_start, int nSites_stop, int nInd, int K,double **Q_1, int totSites, int startI, int stopI, char **keeps, double ***prodA, double ***prodB, int nThreads){
  for(int i=startI;i<stopI;i++){  
     for(int k=0;k<K;k++){
       int nMisTotSites=totSites;
@@ -392,13 +395,18 @@ void updateQ(double** Q_0, double** F_0, int nSites_start,int nSites_stop, int n
       for(int t=0;t<nThreads;t++){
 	prod1 += prodA[t][i][k];
 	prod2 += prodB[t][i][k];
-
       }
       //      fprintf(stdout,"nThreads %d %d %f %f\n",nThreads,i,prod1,prod2);
       //      exit(0);
       double sumAGBG = prod1 * Q_0[i][k] + prod2 * Q_0[i][k];
-      Q_1[i][k]=sumAGBG/(2*totSites);
-     }
+      if(fixInd[i] >= 0)
+	Q_1[i][k] = Q_0[i][k];
+      else
+	Q_1[i][k]=sumAGBG/(2*totSites);
+
+      if(isnan(Q_1[i][k]))
+	printf("WARNING: NaN found at indiv %d and K %d (set as %d): %f %f (%f %f)\n", i, k, fixInd[i], Q_0[i][k], Q_1[i][k], prod1, prod2);
+    }
   }
 }
 
@@ -425,6 +433,10 @@ FILE *openFile(const char* a,const char* b){
   }
   dumpedFiles.push_back(strdup(c));
   FILE *fp = fopen(c,"w");
+  if(fp == NULL){
+    fprintf(stderr, "ERROR: cannot open file %s", c);
+    exit(-1);
+  }
   delete [] c;
   return fp;
 }
@@ -442,7 +454,11 @@ gzFile openFileGz(const char* a,const char* b){
     exit(0);
   }
   dumpedFiles.push_back(strdup(c));
-  gzFile fp = gzopen(c,"w");
+  gzFile fp = gzopen(c,"w9");
+  if(fp == NULL){
+    fprintf(stderr, "ERROR: cannot open file %s", c);
+    exit(-1);
+  }
   delete [] c;
   return fp;
 }
@@ -457,6 +473,7 @@ typedef struct{
   char **ids;
   int nSites;
   int nInd;
+  int *fixInd;
   char **keeps; //matrix containing 0/1 indicating if data or missing
   int *keepInd; //keepInd[nSites] this is the number if informative samples
   float *mafs;
@@ -492,7 +509,7 @@ F doesn't do crap
   After the file has been read intotal it reloops over the lines in the vector and parses data
  */
 
-bgl readBeagle(const char* fname) {
+  bgl readBeagle(const char* fname) {
   const char *delims = "\t \n";
   gzFile fp = NULL;
   if(Z_NULL==(fp=gzopen(fname,"r"))){
@@ -519,7 +536,8 @@ bgl readBeagle(const char* fname) {
   std::vector<char*> tmp;
   while(gzgets(fp,buf,LENS))
     tmp.push_back(strdup(buf));
-  
+  gzclose(fp); //clean up filepointer
+
   //now we now the number of sites
   ret.nSites=tmp.size();
   ret.major= new char[ret.nSites];
@@ -576,10 +594,51 @@ bgl readBeagle(const char* fname) {
     ret.keepInd[s] = nKeep;
     ret.mafs[s] = emFrequency(ret.genos[s],ret.nInd,MAF_ITER,MAF_START,ret.keeps[s],ret.keepInd[s]);
   }
+
   //  keeps=ret.keeps;
-  gzclose(fp); //clean up filepointer
   return ret;
 }
+
+
+// read POP file
+int readPop(int* fixInd, int nInd, const char* pname){
+  int n_fixInd = 0;
+  char buf[LENS];
+  std::map<std::string, int> fixK;
+
+  /* open file for reading */
+  FILE *fh = fopen(pname,"r");
+  if(fh == NULL){
+    fprintf(stderr,"ERROR: cannot open POP file: %s\n", pname);
+    exit(-1);
+  }
+  for(int i=0; i<nInd; i++)
+    {
+      // Set Ind as not-fixed by default
+      fixInd[i] = -1;
+
+      if(fgets(buf, LENS, fh) == NULL){
+	fprintf(stderr, "ERROR: cannot read POP file for individual %d (out of %d)!\n", i+1, nInd);
+	exit(-1);
+      }
+
+      if(strlen(buf)<1 || !isalnum(buf[0]))
+	continue;
+
+      std::string buf_str = std::string(buf);
+      // If new label, add it to MAP
+      if (fixK.find(buf_str) == fixK.end())
+	fixK[buf_str] = fixK.size() - 1;
+
+      // Set indiv as fixed
+      fixInd[i] = fixK[buf_str];
+      n_fixInd++;
+    }
+
+  fclose(fh);  /* close file */
+  return n_fixInd;
+}
+
 
 void readDouble(double **d,int x,int y,const char*fname,int neg){
   fprintf(stderr,"opening : %s with x=%d y=%d\n",fname,x,y);
@@ -835,7 +894,7 @@ double like_tsk(double **Q,double **F,int nThreads){
 }
 
 
-void em(double** Q, double** F, int nSites, int nInd, int K,double **genos,double **F_1,double **Q_1) {
+void em(double** Q, double** F, int* fixInd, int nSites, int nInd, int K,double **genos,double **F_1,double **Q_1) {
   //  fprintf(stderr,"no threads no sqem\n");
   #ifdef CHECK
   checkFQ(F,Q,nSites,nInd,K,"em lorte start ");
@@ -874,8 +933,8 @@ void em(double** Q, double** F, int nSites, int nInd, int K,double **genos,doubl
   getExpGandFstar(Q,F,0,nSites,nInd,K,genos,0,nInd,keeps,prodA,prodB,F_1,0);
   //  updateF(Q, F,0,nSites,nInd,K,F_1,expG2,expG1,0,nInd);
   //  updateF(Q, F,0,nSites,nInd,K,F_1,expG2,expG1,0,nInd,keeps);
-  //  updateQ(Q,F,0,nSites,nInd,K,Q_1,nSites,expG2,expG1,0,nInd);
-  updateQ(Q,F,0,nSites,nInd,K,Q_1,nSites,0,nInd,keeps,prodA,prodB,1);
+  //  updateQ(Q,F,fixInd,0,nSites,nInd,K,Q_1,nSites,expG2,expG1,0,nInd);
+  updateQ(Q,F,fixInd,0,nSites,nInd,K,Q_1,nSites,0,nInd,keeps,prodA,prodB,1);
 
  
   map2domainQ(Q_1,nInd,K);
@@ -892,7 +951,7 @@ int dumpOld =0;
 
 //Q,F are the old F_1,Q_1 are the next startpoint
 
-void emSQ_threads(double** Q, double** F, int nSites_start,int nSites_stop, int nInd, int K,double **genos,double **F_1,double **Q_1,int totSites,double ***prodA, double*** prodB,int startI,int stopI,int threadNumber,int nThreads) {
+void emSQ_threads(double** Q, double** F, int* fixInd, int nSites_start,int nSites_stop, int nInd, int K,double **genos,double **F_1,double **Q_1,int totSites,double ***prodA, double*** prodB,int startI,int stopI,int threadNumber,int nThreads) {
 
 
   getExpGandFstar(Q,F,nSites_start,nSites_stop,nInd,K,genos,startI,stopI,keeps,prodA,prodB,F_1,threadNumber);
@@ -907,7 +966,7 @@ void emSQ_threads(double** Q, double** F, int nSites_start,int nSites_stop, int 
       exit(-1);
     }
   //update F and Q 
-  updateQ(Q,F,nSites_start,nSites_stop,nInd,K,Q_1,totSites,startI,stopI,keeps,prodA,prodB,nThreads);
+  updateQ(Q,F,fixInd,nSites_start,nSites_stop,nInd,K,Q_1,totSites,startI,stopI,keeps,prodA,prodB,nThreads);
   if(1){
     ///fixup underoverflow
     for(int s=nSites_start;s<nSites_stop;s++)
@@ -930,7 +989,7 @@ void emSQ_threads(double** Q, double** F, int nSites_start,int nSites_stop, int 
 
 void *emWrap(void *a){
   pars *p = (pars *)a; 
-  emSQ_threads(p->Q,p->F,p->start,p->stop,p->nInd,p->nPop,p->genos,p->F_1,p->Q_1,p->nSites,p->prodA,p->prodB,p->startI,p->stopI,p->threadNumber,p->nThreads);
+  emSQ_threads(p->Q,p->F,p->fixInd,p->start,p->stop,p->nInd,p->nPop,p->genos,p->F_1,p->Q_1,p->nSites,p->prodA,p->prodB,p->startI,p->stopI,p->threadNumber,p->nThreads);
   return NULL;
 }
 
@@ -1030,7 +1089,7 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
   #ifdef CHECK
   //  fprintf(stderr,"em Q F \n");
   #endif
-  em(Q, F, d.nSites, d.nInd, nPop,d.genos,F_em1,Q_em1);
+  em(Q, F, d.fixInd, d.nSites, d.nInd, nPop,d.genos,F_em1,Q_em1);
   minus(F_em1,F,d.nSites,nPop , F_diff1);
   minus(Q_em1,Q,d.nInd,nPop,Q_diff1 );
   
@@ -1042,7 +1101,7 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
    #ifdef CHECK
   //fprintf(stderr,"em Q1 F1 \n");
   #endif
-  em(Q_em1, F_em1, d.nSites, d.nInd, nPop,d.genos,F_em2,Q_em2);
+  em(Q_em1, F_em1, d.fixInd, d.nSites, d.nInd, nPop,d.genos,F_em2,Q_em2);
   
   minus(F_em2,F_em1,d.nSites,nPop , F_diff2);
   minus(Q_em2,Q_em1,d.nInd,nPop,Q_diff2 );
@@ -1078,7 +1137,7 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
     #ifdef CHECK
     //       fprintf(stderr,"em Q2 F2 \n");
     #endif
-    em(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,F_tmp,Q_tmp);
+    em(*Q_new, *F_new, d.fixInd, d.nSites, d.nInd, nPop,d.genos,F_tmp,Q_tmp);
     #ifdef CHECK
     checkFQ(F_tmp,Q_tmp,d.nSites,d.nInd,nPop,"bad em\n");
     #endif
@@ -1267,6 +1326,7 @@ void info(){
   fprintf(stderr,"\t-likes Beagle likelihood filename\n");
   fprintf(stderr,"\t-K Number of ancestral populations\n"); 
   fprintf(stderr,"Optional:\n");
+  fprintf(stderr,"\t-pname Pre-defined admixture proportions (supervised analyses)\n");
   fprintf(stderr,"\t-fname Ancestral population frequencies\n"); 
   fprintf(stderr,"\t-qname Admixture proportions\n"); 
   fprintf(stderr,"\t-outfiles Prefix for output files\n"); 
@@ -1281,7 +1341,7 @@ void info(){
   fprintf(stderr,"Stop chriteria:\n"); 
   fprintf(stderr,"\t-tolLike50 Loglikelihood difference in 50 iterations\n"); 
   fprintf(stderr,"\t-tol Tolerance for convergence\n"); 
-  fprintf(stderr,"\t-dymBound Use dymamic boundaries (1: yes (default) 0: no)\n"); 
+  //fprintf(stderr,"\t-dymBound Use dymamic boundaries (1: yes (default) 0: no)\n"); 
   fprintf(stderr,"\t-maxiter Maximum number of EM iterations\n"); 
 
 
@@ -1441,6 +1501,7 @@ int main(int argc, char **argv){
   const char* lname = NULL;
   const char* fname = NULL;
   const char* qname = NULL;
+  const char* pname = NULL;
   const char* outfiles = NULL;
   int nPop = 3;
   int seed =time(NULL);
@@ -1455,6 +1516,7 @@ int main(int argc, char **argv){
     // to read start values from output from previous run 
     else if(strcmp(*argv,"-fname")==0 || strcmp(*argv,"-f")==0) fname=*++argv; 
     else if(strcmp(*argv,"-qname")==0 || strcmp(*argv,"-q")==0) qname=*++argv;
+    else if(strcmp(*argv,"-pname")==0 || strcmp(*argv,"-p")==0) pname=*++argv;
     // prefix for output files
     else if(strcmp(*argv,"-outfiles")==0 || strcmp(*argv,"-o")==0) outfiles=*++argv; 
     // settings: seed, threads and if method==0 not accelerated
@@ -1472,7 +1534,7 @@ int main(int argc, char **argv){
     else if(strcmp(*argv,"-minLrt")==0||strcmp(*argv,"-lrt")==0) minLrt=atof(*++argv);
     else if(strcmp(*argv,"-minInd")==0||strcmp(*argv,"-mis")==0) minInd=atoi(*++argv);
     // different genotype callers
-    else if(strcmp(*argv,"-dymBound")==0) dymBound=atoi(*++argv);
+    //else if(strcmp(*argv,"-dymBound")==0) dymBound=atoi(*++argv);
     else{
       fprintf(stderr,"Unknown arg:%s\n",*argv);
       info();
@@ -1481,9 +1543,11 @@ int main(int argc, char **argv){
     ++argv;
   }
   if(lname==NULL){
-    fprintf(stderr,"Please supply beagle file: -likes");
+    fprintf(stderr,"Please supply beagle file: -likes\n");
     info();
   }
+  if(pname!=NULL)
+    fprintf(stderr,"WARNING: supervised algorithm under development. Please report bugs...\n");
   if(outfiles==NULL){
     fprintf(stderr,"Will use beagle fname as prefix for output\n");
     outfiles=lname;
@@ -1491,17 +1555,18 @@ int main(int argc, char **argv){
   FILE *flog=openFile(outfiles,".log");
   FILE *ffilter=openFile(outfiles,".filter");
 
-  fprintf(stderr,"Input: lname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,nPop,fname,qname,outfiles);
+  fprintf(stderr,"Input: lname=%s pname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,pname,nPop,fname,qname,outfiles);
   fprintf(stderr,"Setup: seed=%d nThreads=%d method=%d\n",seed,nThreads,method);
   fprintf(stderr,"Convergence: maxIter=%d tol=%f tolLike50=%f dymBound=%d\n",maxIter,tol,tolLike50,dymBound);
   fprintf(stderr,"Filters: misTol=%f minMaf=%f minLrt=%f minInd=%d\n",misTol,minMaf,minLrt,minInd);
 
 
-  fprintf(flog,"Input: lname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,nPop,fname,qname,outfiles);
+  fprintf(flog,"Input: lname=%s pname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,pname,nPop,fname,qname,outfiles);
   fprintf(flog,"Setup: seed=%d nThreads=%d method=%d\n",seed,nThreads,method);
   fprintf(flog,"Convergence: maxIter=%d tol=%f tolLike50=%f dymBound=%d\n",maxIter,tol,tolLike50,dymBound);
   fprintf(flog,"Filters: misTol=%f minMaf=%f minLrt=%f minInd=%d\n",misTol,minMaf,minLrt,minInd);
 
+  //DRAGON
   if(dymBound==0){
     errTolStart = errTolMin;
     errTol = errTolMin;
@@ -1515,7 +1580,10 @@ int main(int argc, char **argv){
   fprintf(flog,"Input file has dim: nsites=%d nind=%d\n",d.nSites,d.nInd);
 
   // filter sites
-  if(minMaf!=0.0)
+  if(minMaf<0.5/d.nInd){
+    fprintf(stderr,"ERROR: use of monomorphic sites in ngsAdmix is not advised\n");
+    exit(-1);
+  }else
     filterMinMaf(d,minMaf);
   if(minLrt!=0.0)
     filterMinLrt(d,minLrt);
@@ -1540,7 +1608,6 @@ int main(int argc, char **argv){
   double **Q =allocDouble(d.nInd,nPop);
   double **F_new =allocDouble(d.nSites,nPop);
   double **Q_new =allocDouble(d.nInd,nPop);
-  
 
   //get start values
   if(fname==NULL){
@@ -1552,6 +1619,7 @@ int main(int argc, char **argv){
       }
   }else
     readDoubleGZ(F,d.nSites,nPop,fname,0);
+
   if(qname==NULL){
     for(int i=0;i<d.nInd;i++) {
       double sum=0;
@@ -1568,6 +1636,56 @@ int main(int argc, char **argv){
   }else
     readDouble(Q,d.nInd,nPop,qname,0);
   
+  d.fixInd = new int[d.nInd];
+  if(pname==NULL){
+    for(int i=0;i<d.nInd;i++)
+      d.fixInd[i] = -1;
+  }else{
+    if(qname!=NULL)
+      fprintf(stderr,"POP file info will overwrite Q information\n");
+
+    // Get supervised clusters
+    int n_fixInd = readPop(d.fixInd, d.nInd, pname);
+    // Get number of supervised clusters
+    int maxPop = *std::max_element(d.fixInd,d.fixInd+d.nInd);
+    fprintf(stderr, "Supervised analyses with %d individuals (out of %d) in %d K\n", n_fixInd, d.nInd, maxPop+1);
+    fprintf(flog, "Supervised analyses with %d individuals (out of %d) in %d K\n", n_fixInd, d.nInd, maxPop+1);
+    if(nPop < maxPop+1){
+      fprintf(stderr,"ERROR: less total (%d) than supervised (%d) clusters!\n",nPop,maxPop+1);
+      exit(-1);
+    }
+
+    // Fill in Q matrix with initial proportions
+    for(int i=0;i<d.nInd;i++){
+      for(int k=0;k<nPop;k++)
+	if(d.fixInd[i] >= 0)
+	  Q[i][k] = (d.fixInd[i]==k ? 1 : 0);
+	else if(k <= maxPop)
+	  Q[i][k] = errTolMin;
+
+      // Normalization
+      double sum = 0;
+      for(int k=0;k<nPop;k++)
+	sum += Q[i][k];
+      for(int k=0;k<nPop;k++)
+	Q[i][k] = Q_new[i][k] = Q[i][k]/sum;
+    }
+
+    /*
+    // Update frequencies
+    static double ***prodA = allocDouble3(1,d.nInd,nPop);
+    static double ***prodB = allocDouble3(1,d.nInd,nPop);
+    for(int i=0;i<d.nInd;i++)
+      for(int k=0;k<nPop;k++)
+	prodA[0][i][k] = prodB[0][i][k] = 0;
+    getExpGandFstar(Q,F_new,0,d.nSites,d.nInd,nPop,d.genos,0,d.nInd,keeps,prodA,prodB,F,0);
+    dallocDouble3(prodA,1,d.nInd);
+    dallocDouble3(prodB,1,d.nInd);
+    */
+  }
+
+
+
   //  double res =likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos);    
   //  fprintf(stderr,"startres=%f\n",res);
   //emsquare stuff beloq
@@ -1615,6 +1733,7 @@ int main(int argc, char **argv){
       myPars[i].genos=d.genos;
       myPars[i].nInd=d.nInd;
       myPars[i].nSites=d.nSites;
+      myPars[i].fixInd=d.fixInd;
     }
     //return 0;
     if(pthread_barrier_init(&barr, NULL, nThreads)){
@@ -1625,7 +1744,7 @@ int main(int argc, char **argv){
   }
   
   double lold = -likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos);
-  fprintf(stderr,"iter[start] like is=%f\n",lold);
+  fprintf(stderr,"iter[start] like is=%f\n",-lold);
   
   //below is the main looping trhought the iterations.
   // we have 4 possible ways, threading/nothreading line/noline
@@ -1637,7 +1756,7 @@ int main(int argc, char **argv){
   for(nit=1;SIG_COND&& nit<maxIter;nit++) {
     if(nThreads==1){
       if(method==0)//no acceleration
-	em(Q, F, d.nSites, d.nInd, nPop,d.genos,F_new,Q_new);
+	em(Q, F, d.fixInd, d.nSites, d.nInd, nPop,d.genos,F_new,Q_new);
       else{
 	if(emAccel(d,nPop,F,Q,&F_new,&Q_new,lold)==0){
 
@@ -1748,7 +1867,7 @@ int main(int argc, char **argv){
   delete [] myPars;
   
   if(nThreads==1){
-    em(NULL, NULL, 0, 0, 0,NULL,NULL,NULL);
+    em(NULL, NULL, NULL, 0, 0, 0,NULL,NULL,NULL);
   }
 
 
