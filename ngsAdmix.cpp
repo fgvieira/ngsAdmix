@@ -1,6 +1,8 @@
 /*
   log:
 
+  ngsAdmix34: prints genotype posterior probabilities
+  g++ ngsAdmix34.cpp -lz -lpthread  -O3 -o ngsAdmix
   ngsAdmix33: implemented supervised algorithm
   g++ ngsAdmix33.cpp -lz -lpthread  -O3 -o ngsAdmix
   ngsAdmix32: program now works on osx
@@ -38,7 +40,7 @@
   version 18 line er soed
   cutoff for genotype calling -cut (only works when compiled with -DDO_MIS)
   call genotypes (maxLike, hweLike) and update freq estimate before filtering - because this is what people will do
-  icpc ngsAdmix18.cpp -lz -lpthread -O3 -o ngsAdmix18
+  icpc ngsAdmix18.cpp -lz -lpthread  -O3 -o ngsAdmix18
   icpc ngsAdmix18.cpp -lz -lpthread -DDO_MIS -O3 -o ngsAdmix18mis
   
   //version 17
@@ -456,7 +458,7 @@ gzFile openFileGz(const char* a,const char* b){
   dumpedFiles.push_back(strdup(c));
   gzFile fp = gzopen(c,"w9");
   if(fp == NULL){
-    fprintf(stderr, "ERROR: cannot open file %s", c);
+    fprintf(stderr, "ERROR: cannot open Gzip file %s", c);
     exit(-1);
   }
   delete [] c;
@@ -788,6 +790,17 @@ void printDoubleGz(double **ret,size_t x,size_t y,gzFile fp){
     gzprintf(fp,"\n");
   }
 }
+
+void printBeagle(bgl data, gzFile fp){
+  for(size_t s = 0; s < data.nSites; s++){
+    gzprintf(fp,"%s\t%c\t%c", data.ids[s], data.major[s], data.minor[s]);
+    for(size_t i = 0; i < data.nInd; i++)
+      gzprintf(fp,"\t%.6f\t%.6f\t%.6f", data.genos[s][i*3+0], data.genos[s][i*3+1], data.genos[s][i*3+2]);
+    gzprintf(fp,"\n");
+  }
+}
+
+
 
 void checkFQ(double **F,double **Q,int nSites,int nInd,int K,const char *function){
   
@@ -1543,11 +1556,9 @@ int main(int argc, char **argv){
     ++argv;
   }
   if(lname==NULL){
-    fprintf(stderr,"Please supply beagle file: -likes\n");
+    fprintf(stderr,"Please supply beagle file: -likes");
     info();
   }
-  if(pname!=NULL)
-    fprintf(stderr,"WARNING: supervised algorithm under development. Please report bugs...\n");
   if(outfiles==NULL){
     fprintf(stderr,"Will use beagle fname as prefix for output\n");
     outfiles=lname;
@@ -1580,8 +1591,8 @@ int main(int argc, char **argv){
   fprintf(flog,"Input file has dim: nsites=%d nind=%d\n",d.nSites,d.nInd);
 
   // filter sites
-  if(minMaf<0.5/d.nInd){
-    fprintf(stderr,"ERROR: use of monomorphic sites in ngsAdmix is not advised\n");
+  if(minMaf==0.0){
+    fprintf(stderr,"ERROR: use of monomorphic (MAF == 0) sites in ngsAdmix is not advised\n");
     exit(-1);
   }else
     filterMinMaf(d,minMaf);
@@ -1655,7 +1666,6 @@ int main(int argc, char **argv){
       exit(-1);
     }
 
-    // Fill in Q matrix with initial proportions
     for(int i=0;i<d.nInd;i++){
       for(int k=0;k<nPop;k++)
 	if(d.fixInd[i] >= 0)
@@ -1663,7 +1673,6 @@ int main(int argc, char **argv){
 	else if(k <= maxPop)
 	  Q[i][k] = errTolMin;
 
-      // Normalization
       double sum = 0;
       for(int k=0;k<nPop;k++)
 	sum += Q[i][k];
@@ -1847,6 +1856,28 @@ int main(int argc, char **argv){
   printDoubleGz(F,d.nSites,nPop,fpGz);
   gzclose(fpGz);
   
+  // Print genotypes posterior probabilities
+  double sum = 0;
+  for(int s = 0; s < d.nSites; s++)
+    for(int i = 0; i < d.nInd; i++){
+      double maf = 0;
+      for(int k = 0; k < nPop; k++)
+	maf += Q[i][k]*F[s][k];
+
+      d.genos[s][i*3+0] = d.genos[s][i*3+0] * pow(1-maf, 2);
+      d.genos[s][i*3+1] = d.genos[s][i*3+1] * 2*maf*(1-maf);
+      d.genos[s][i*3+2] = d.genos[s][i*3+2] * pow(maf, 2);
+
+      // Norm
+      sum = d.genos[s][i*3+0] + d.genos[s][i*3+1] + d.genos[s][i*3+2];
+      d.genos[s][i*3+0] /= sum;
+      d.genos[s][i*3+1] /= sum;
+      d.genos[s][i*3+2] /= sum;
+    }
+  gzFile fpBgl = openFileGz(outfiles,".geno.gz");
+  printBeagle(d, fpBgl);
+  gzclose(fpBgl);
+
   
   
   //deallocate memory
