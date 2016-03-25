@@ -17,4 +17,4 @@ If you have any questions about the use of this program, please check the offici
 
 
 # Citation
-If you use this program, please cite the original paper [Koreliussen et al. 2013](https://www.ncbi.nlm.nih.gov/pubmed/24026093).
+If you use this program, please cite the original paper [Skotte et al. 2013](https://www.ncbi.nlm.nih.gov/pubmed/24026093).
