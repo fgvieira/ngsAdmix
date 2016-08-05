@@ -1509,6 +1509,7 @@ int main(int argc, char **argv){
   int method = 1;
   int minInd = 0;
   int printInfo = 0;
+  bool printGeno = false;
   float minMaf =0.05;
   float minLrt =0;
   const char* lname = NULL;
@@ -1536,6 +1537,7 @@ int main(int argc, char **argv){
     else if(strcmp(*argv,"-seed")==0||strcmp(*argv,"-s")==0) seed=atoi(*++argv);
     else if(strcmp(*argv,"-P")==0) nThreads=atoi(*++argv); 
     else if(strcmp(*argv,"-printInfo")==0) printInfo=atoi(*++argv); 
+    else if(strcmp(*argv,"-printGeno")==0) printGeno=true;
     else if(strcmp(*argv,"-method")==0 || strcmp(*argv,"-m")==0) method=atoi(*++argv); 
     // different stop chriteria
     else if(strcmp(*argv,"-tolLike50")==0||strcmp(*argv,"-lt50")==0) tolLike50=atof(*++argv);
@@ -1566,13 +1568,13 @@ int main(int argc, char **argv){
   FILE *flog=openFile(outfiles,".log");
   FILE *ffilter=openFile(outfiles,".filter");
 
-  fprintf(stderr,"Input: lname=%s pname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,pname,nPop,fname,qname,outfiles);
+  fprintf(stderr,"Input: lname=%s pname=%s nPop=%d, fname=%s qname=%s printGeno=%s outfiles=%s\n",lname,pname,nPop,fname,qname,(printGeno ? "true" : "false"),outfiles);
   fprintf(stderr,"Setup: seed=%d nThreads=%d method=%d\n",seed,nThreads,method);
   fprintf(stderr,"Convergence: maxIter=%d tol=%f tolLike50=%f dymBound=%d\n",maxIter,tol,tolLike50,dymBound);
   fprintf(stderr,"Filters: misTol=%f minMaf=%f minLrt=%f minInd=%d\n",misTol,minMaf,minLrt,minInd);
 
 
-  fprintf(flog,"Input: lname=%s pname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,pname,nPop,fname,qname,outfiles);
+  fprintf(flog,"Input: lname=%s pname=%s nPop=%d, fname=%s qname=%s printGeno=%s outfiles=%s\n",lname,pname,nPop,fname,qname,(printGeno ? "true" : "false"),outfiles);
   fprintf(flog,"Setup: seed=%d nThreads=%d method=%d\n",seed,nThreads,method);
   fprintf(flog,"Convergence: maxIter=%d tol=%f tolLike50=%f dymBound=%d\n",maxIter,tol,tolLike50,dymBound);
   fprintf(flog,"Filters: misTol=%f minMaf=%f minLrt=%f minInd=%d\n",misTol,minMaf,minLrt,minInd);
@@ -1857,26 +1859,28 @@ int main(int argc, char **argv){
   gzclose(fpGz);
   
   // Print genotypes posterior probabilities
-  double sum = 0;
-  for(int s = 0; s < d.nSites; s++)
-    for(int i = 0; i < d.nInd; i++){
-      double maf = 0;
-      for(int k = 0; k < nPop; k++)
-	maf += Q[i][k]*F[s][k];
+  if(printGeno){
+    double sum = 0;
+    for(int s = 0; s < d.nSites; s++)
+      for(int i = 0; i < d.nInd; i++){
+	double maf = 0;
+	for(int k = 0; k < nPop; k++)
+	  maf += Q[i][k]*F[s][k];
 
-      d.genos[s][i*3+0] = d.genos[s][i*3+0] * pow(1-maf, 2);
-      d.genos[s][i*3+1] = d.genos[s][i*3+1] * 2*maf*(1-maf);
-      d.genos[s][i*3+2] = d.genos[s][i*3+2] * pow(maf, 2);
+	d.genos[s][i*3+0] = d.genos[s][i*3+0] * pow(1-maf, 2);
+	d.genos[s][i*3+1] = d.genos[s][i*3+1] * 2*maf*(1-maf);
+	d.genos[s][i*3+2] = d.genos[s][i*3+2] * pow(maf, 2);
 
-      // Norm
-      sum = d.genos[s][i*3+0] + d.genos[s][i*3+1] + d.genos[s][i*3+2];
-      d.genos[s][i*3+0] /= sum;
-      d.genos[s][i*3+1] /= sum;
-      d.genos[s][i*3+2] /= sum;
-    }
-  gzFile fpBgl = openFileGz(outfiles,".geno.gz");
-  printBeagle(d, fpBgl);
-  gzclose(fpBgl);
+	// Norm
+	sum = d.genos[s][i*3+0] + d.genos[s][i*3+1] + d.genos[s][i*3+2];
+	d.genos[s][i*3+0] /= sum;
+	d.genos[s][i*3+1] /= sum;
+	d.genos[s][i*3+2] /= sum;
+      }
+    gzFile fpBgl = openFileGz(outfiles,".geno.gz");
+    printBeagle(d, fpBgl);
+    gzclose(fpBgl);
+  }
 
   
   
