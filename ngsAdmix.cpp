@@ -187,6 +187,7 @@ typedef struct{
   double **genos;
   int nInd;
   int nSites;
+  double *indF; //stores the per-individual inbreeding
   double lres;//this is the likelihood for a block of data. total likelihood is sum of lres.
 }pars;
 
@@ -195,21 +196,28 @@ pthread_t *threads = NULL;
 pars * myPars= NULL; //den ovenfor definerede struct type
 
  
-double likeFixedMinor(double p,double *likes,int numInds,char *keepInd){
+double likeFixedMinor(double p,double *likes,double *indF,int numInds,char *keepInd){
   // should these actually be normed genotype likelihoods? Or not normed?
   // only used for checking minLrt
   // returns minus the log of the likelihood
   double totalLike=0;
   for(int i=0;i<numInds;i++){
-    if(keepInd[i])
-      totalLike+=log(likes[i*3+0]*(1-p)*(1-p)+likes[i*3+1]*2.0*p*(1-p)+likes[i*3+2]*p*p);
+    if(keepInd[i]) {
+      double g0 = pow(1-p,2) + (1-p)*p*indF[i];
+      double g1 = 2*(1-p)*p - 2*(1-p)*p*indF[i];
+      double g2 = pow(p,2) + (1-p)*p*indF[i];
+
+      totalLike += log(likes[i*3+0]*g0 +
+		       likes[i*3+1]*g1 +
+		       likes[i*3+2]*g2);
+    }
   }
   return -totalLike;
 }
 
 
 
-double emFrequency(double *loglike,int numInds, int iter,double start,char *keep,int keepInd){
+double emFrequency(double *loglike,double *indF,int numInds,int iter,double start,char *keep,int keepInd){
 
   if(keepInd == 0)
     return 0.0;
@@ -232,9 +240,14 @@ double emFrequency(double *loglike,int numInds, int iter,double start,char *keep
     for(int i=0;i<numInds;i++){
       if(keep!=NULL && keep[i]==0)
         continue;
-      W0=(loglike[i*3+0])*(1-p)*(1-p);
-      W1=(loglike[i*3+1])*2*p*(1-p);
-      W2=(loglike[i*3+2])*p*p;
+
+      double g0 = pow(1-p,2) + (1-p)*p*indF[i];
+      double g1 = 2*(1-p)*p - 2*(1-p)*p*indF[i];
+      double g2 = pow(p,2) + (1-p)*p*indF[i];
+
+      W0=loglike[i*3+0]*g0;
+      W1=loglike[i*3+1]*g1;
+      W2=loglike[i*3+2]*g2;
       sum+=(W1+2*W2)/(2*(W0+W1+W2));
       //  fprintf(stderr,"%f %f %f\n",W0,W1,W2);
       if(0&&std::isnan(sum)){
@@ -286,7 +299,7 @@ double emFrequency(double *loglike,int numInds, int iter,double start,char *keep
 
 
 
-void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, int nInd, int K,double **genos,int startI,int stopI,char **keeps,double ***prodA,double ***prodB,double **F_1,int thread){
+void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, int nInd, int K,double **genos,int startI,int stopI,char **keeps,double ***prodA,double ***prodB,double **F_1,double *indF,int thread){
 
     for(int j=nSites_start;j<nSites_stop;j++){
       double sumAG[K];
@@ -309,9 +322,14 @@ void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, i
 	    fpart += F[j][k] * Q[i][k];
 	  }
 	  fpart=1-fpart;
-	  double pp0=fpart*fpart*        genos[j][3*i+0];
-	  double pp1=2*(1-fpart)*fpart*  genos[j][3*i+1];
-	  double pp2=(1-fpart)*(1-fpart)*genos[j][3*i+2];
+	  
+	  double g0 = pow(fpart,2) + fpart*(1-fpart)*indF[i];
+	  double g1 = 2*fpart*(1-fpart) - 2*fpart*(1-fpart)*indF[i];
+	  double g2 = pow(1-fpart,2) + fpart*(1-fpart)*indF[i];
+	  	  
+	  double pp0= genos[j][3*i+0]*g0;
+	  double pp1= genos[j][3*i+1]*g1;
+	  double pp2= genos[j][3*i+2]*g2;
 	  double sum=pp0+pp1+pp2;
 	  double expGG =(pp1+2*pp2)/sum;//range 0-2, this is the expected genotype
 	
@@ -449,7 +467,7 @@ gzFile openFileGz(const char* a,const char* b){
 
 
 
-//some struct will all the data from the beagle file
+//some struct with all the data
 typedef struct{
   double **genos;
   char *major;
@@ -460,6 +478,7 @@ typedef struct{
   char **keeps; //matrix containing 0/1 indicating if data or missing
   int *keepInd; //keepInd[nSites] this is the number if informative samples
   float *mafs;
+  double *indF; //stores the per-individual inbreeding
 }bgl;
 
 //utility function for cleaning up out datastruct
@@ -492,7 +511,7 @@ F doesn't do crap
   After the file has been read intotal it reloops over the lines in the vector and parses data
  */
 
-bgl readBeagle(const char* fname) {
+bgl readBeagle(const char* fname, const char* Fname) {
   const char *delims = "\t \n";
   gzFile fp = NULL;
   if(Z_NULL==(fp=gzopen(fname,"r"))){
@@ -514,18 +533,37 @@ bgl readBeagle(const char* fname) {
     exit(0);
   }
   ret.nInd = (ncols-3)/3;//this is the number of samples
-  
+
   //read every line into a vector
   std::vector<char*> tmp;
   while(gzgets(fp,buf,LENS))
     tmp.push_back(strdup(buf));
+  gzclose(fp); //clean up filepointer
   
+  //get F values
+  ret.indF = new double[ret.nInd];
+  if(Fname==NULL) {
+    for(int i=0;i<ret.nInd;i++) {
+      ret.indF[i] = 0;
+    }
+  } else {
+   FILE *fh = NULL;
+   fh = fopen(Fname, "rt");  /* open the file for reading */
+   for(int i=0; i<ret.nInd; i++)
+   {
+	  if(fgets(buf, LENS, fh) == NULL)
+		perror("ERROR: cannot read indF file!\n");
+	  ret.indF[i] = atof(buf);
+   }
+   fclose(fh);  /* close the file prior to exiting the routine */
+  }
+
   //now we now the number of sites
-  ret.nSites=tmp.size();
-  ret.major= new char[ret.nSites];
-  ret.minor= new char[ret.nSites];
+  ret.nSites = tmp.size();
+  ret.major = new char[ret.nSites];
+  ret.minor = new char[ret.nSites];
   ret.ids = new char*[ret.nSites];
-  ret.genos= new double*[ret.nSites];
+  ret.genos = new double*[ret.nSites];
 
   //then loop over the vector and parsing every line
   for(int s=0;SIG_COND&& (s<ret.nSites);s++){
@@ -574,10 +612,10 @@ bgl readBeagle(const char* fname) {
       }
     }
     ret.keepInd[s] = nKeep;
-    ret.mafs[s] = emFrequency(ret.genos[s],ret.nInd,MAF_ITER,MAF_START,ret.keeps[s],ret.keepInd[s]);
+    ret.mafs[s] = emFrequency(ret.genos[s],ret.indF,ret.nInd,MAF_ITER,MAF_START,ret.keeps[s],ret.keepInd[s]);
   }
   //  keeps=ret.keeps;
-  gzclose(fp); //clean up filepointer
+  
   return ret;
 }
 
@@ -760,7 +798,7 @@ void checkFQ(double **F,double **Q,int nSites,int nInd,int K,const char *functio
 int printer =0;
 
 //threaded
-double likelihood(double** Q, double** F,int nSites, int nInd,int K,double **genos){
+double likelihood(double** Q, double** F,int nSites, int nInd,int K,double **genos,double *indF){
   // F is sites times npop
   // Q is nInd times npop
   double prod_sit = 0.0;
@@ -771,10 +809,16 @@ double likelihood(double** Q, double** F,int nSites, int nInd,int K,double **gen
       double freq = 0.0;
       for(int k = 0; k < K; k++) 
 	freq += (F[j][k])*Q[i][k];
-      double f =1- freq;
-      double sum = gg[0] * f * f;
-      sum += gg[1]*2*f*(1-f);
-      sum += gg[2]*(1-f)*(1-f);
+	
+      double f = 1-freq;
+      double g0 = pow(f,2) + f*(1-f)*indF[i];
+      double g1 = 2*f*(1-f) - 2*f*(1-f)*indF[i];
+      double g2 = pow(1-f,2) + f*(1-f)*indF[i];
+      
+      double sum = 0;
+      sum += gg[0] * g0;
+      sum += gg[1] * g1;
+      sum += gg[2] * g2;
       prod_ind += log(sum);
     }
     prod_sit += prod_ind;     
@@ -788,7 +832,7 @@ double likelihood(double** Q, double** F,int nSites, int nInd,int K,double **gen
 
 // log likelihood for single site
 // fills it directly into the structure
-void likelihood_thd(double** Q, double** F,int nSites,int startI, int stopI,int K,double **genos,double &prod_sit){
+void likelihood_thd(double** Q, double** F,int nSites,int startI, int stopI,int K,double **genos,double *indF,double &prod_sit){
   // F is sites times npop
   // Q is nInd times npop
   prod_sit =0;
@@ -799,10 +843,16 @@ void likelihood_thd(double** Q, double** F,int nSites,int startI, int stopI,int 
       double freq = 0.0;
       for(int k = 0; k < K; k++) 
 	freq += (F[j][k])*Q[i][k];
+ 
       double f =1- freq;
-      double sum = gg[0] * f * f;
-      sum += gg[1]*2*f*(1-f);
-      sum += gg[2]*(1-f)*(1-f);
+      double g0 = pow(f,2) + f*(1-f)*indF[i];
+      double g1 = 2*f*(1-f) - 2*f*(1-f)*indF[i];
+      double g2 = pow(1-f,2) + f*(1-f)*indF[i];
+      
+      double sum = 0;
+      sum += gg[0] * g0;
+      sum += gg[1] * g1;
+      sum += gg[2] * g2;
       prod_ind += log(sum); //collect all site for a single individual
     }
     prod_sit += prod_ind;     
@@ -811,7 +861,7 @@ void likelihood_thd(double** Q, double** F,int nSites,int startI, int stopI,int 
 }
 void *lkWrap(void *a){
   pars *p = (pars *)a; 
-  likelihood_thd(p->Q,p->F,p->nSites,p->startI,p->stopI,p->nPop,p->genos,p->lres);
+  likelihood_thd(p->Q,p->F,p->nSites,p->startI,p->stopI,p->nPop,p->genos,p->indF,p->lres);
   return NULL;
 }
 
@@ -835,7 +885,7 @@ double like_tsk(double **Q,double **F,int nThreads){
 }
 
 
-void em(double** Q, double** F, int nSites, int nInd, int K,double **genos,double **F_1,double **Q_1) {
+void em(double** Q, double** F, int nSites, int nInd, int K,double **genos,double **F_1,double **Q_1,double *indF) {
   //  fprintf(stderr,"no threads no sqem\n");
   #ifdef CHECK
   checkFQ(F,Q,nSites,nInd,K,"em lorte start ");
@@ -871,7 +921,7 @@ void em(double** Q, double** F, int nSites, int nInd, int K,double **genos,doubl
 
 
   //  getExpGandExpG2(Q,F,0,nSites,nInd,K,genos,expG2,expG1,0,nInd);
-  getExpGandFstar(Q,F,0,nSites,nInd,K,genos,0,nInd,keeps,prodA,prodB,F_1,0);
+  getExpGandFstar(Q,F,0,nSites,nInd,K,genos,0,nInd,keeps,prodA,prodB,F_1,indF,0);
   //  updateF(Q, F,0,nSites,nInd,K,F_1,expG2,expG1,0,nInd);
   //  updateF(Q, F,0,nSites,nInd,K,F_1,expG2,expG1,0,nInd,keeps);
   //  updateQ(Q,F,0,nSites,nInd,K,Q_1,nSites,expG2,expG1,0,nInd);
@@ -892,10 +942,10 @@ int dumpOld =0;
 
 //Q,F are the old F_1,Q_1 are the next startpoint
 
-void emSQ_threads(double** Q, double** F, int nSites_start,int nSites_stop, int nInd, int K,double **genos,double **F_1,double **Q_1,int totSites,double ***prodA, double*** prodB,int startI,int stopI,int threadNumber,int nThreads) {
+void emSQ_threads(double** Q, double** F, int nSites_start,int nSites_stop, int nInd, int K,double **genos,double **F_1,double **Q_1,double *indF,int totSites,double ***prodA, double*** prodB,int startI,int stopI,int threadNumber,int nThreads) {
 
 
-  getExpGandFstar(Q,F,nSites_start,nSites_stop,nInd,K,genos,startI,stopI,keeps,prodA,prodB,F_1,threadNumber);
+  getExpGandFstar(Q,F,nSites_start,nSites_stop,nInd,K,genos,startI,stopI,keeps,prodA,prodB,F_1,indF,threadNumber);
    //we wait untill all threads reach this point.
   int rc = pthread_barrier_wait(&barr);
 #ifdef __APPLE__ 
@@ -930,7 +980,7 @@ void emSQ_threads(double** Q, double** F, int nSites_start,int nSites_stop, int 
 
 void *emWrap(void *a){
   pars *p = (pars *)a; 
-  emSQ_threads(p->Q,p->F,p->start,p->stop,p->nInd,p->nPop,p->genos,p->F_1,p->Q_1,p->nSites,p->prodA,p->prodB,p->startI,p->stopI,p->threadNumber,p->nThreads);
+  emSQ_threads(p->Q,p->F,p->start,p->stop,p->nInd,p->nPop,p->genos,p->F_1,p->Q_1,p->indF,p->nSites,p->prodA,p->prodB,p->startI,p->stopI,p->threadNumber,p->nThreads);
   return NULL;
 }
 
@@ -1030,7 +1080,7 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
   #ifdef CHECK
   //  fprintf(stderr,"em Q F \n");
   #endif
-  em(Q, F, d.nSites, d.nInd, nPop,d.genos,F_em1,Q_em1);
+  em(Q, F, d.nSites, d.nInd, nPop,d.genos,F_em1,Q_em1,d.indF);
   minus(F_em1,F,d.nSites,nPop , F_diff1);
   minus(Q_em1,Q,d.nInd,nPop,Q_diff1 );
   
@@ -1042,7 +1092,7 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
    #ifdef CHECK
   //fprintf(stderr,"em Q1 F1 \n");
   #endif
-  em(Q_em1, F_em1, d.nSites, d.nInd, nPop,d.genos,F_em2,Q_em2);
+  em(Q_em1, F_em1, d.nSites, d.nInd, nPop,d.genos,F_em2,Q_em2,d.indF);
   
   minus(F_em2,F_em1,d.nSites,nPop , F_diff2);
   minus(Q_em2,Q_em1,d.nInd,nPop,Q_diff2 );
@@ -1073,12 +1123,12 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
     }
   }
   map2domainQ(*Q_new,d.nInd,nPop);
-  //  fprintf(stderr,"lik %f\n",-likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos));
+  //  fprintf(stderr,"lik %f\n",-likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,d.indF));
   if (fabs(alpha - 1) > 0.01){
     #ifdef CHECK
     //       fprintf(stderr,"em Q2 F2 \n");
     #endif
-    em(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,F_tmp,Q_tmp);
+    em(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,F_tmp,Q_tmp,d.indF);
     #ifdef CHECK
     checkFQ(F_tmp,Q_tmp,d.nSites,d.nInd,nPop,"bad em\n");
     #endif
@@ -1091,14 +1141,14 @@ int emAccel(const bgl &d,int nPop,double **F,double **Q,double ***F_new,double *
   }
   double lnew =0;
   #ifdef DO_MIS
-  lnew = -likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos);
+  lnew = -likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,d.indF);
   if ( (lnew > lold + objfnInc)) {
     fprintf(stderr,"bad guess in %s\n", __FUNCTION__);
     //    *Q_new = Q_em2;
     //    *F_new =F_em2;
     std::swap(*Q_new,Q_em2);
     std::swap(*F_new,F_em2);
-    lnew = -likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos);
+    lnew = -likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,d.indF);
     if (alpha == stepMax)
       stepMax = std::max(stepMax0, stepMax/mstep);
   } 
@@ -1224,7 +1274,7 @@ int emAccelThread(const bgl &d,int nPop,double **F,double **Q,double ***F_new,do
   map2domainQ(*Q_new,d.nInd,nPop);
   
 
-  //fprintf(stderr,"lik %f\n",-likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos));
+  //fprintf(stderr,"lik %f\n",-likelihood(*Q_new, *F_new, d.nSites, d.nInd, nPop,d.genos,d.indF));
   //  checkFQ(*F_new,*Q_new,d.nSites,d.nInd,nPop,__FUNCTION__);
   if (fabs(alpha - 1) > 0.01){
     em_threadStart(*Q_new,Q_tmp,*F_new,F_tmp,nThreads);
@@ -1234,7 +1284,7 @@ int emAccelThread(const bgl &d,int nPop,double **F,double **Q,double ***F_new,do
     std::swap(*F_new,F_tmp);
   }
   
-  //  double lnew = -likelihood(Q_new, F_new, d.nSites, d.nInd, nPop,d.genos);
+  //  double lnew = -likelihood(Q_new, F_new, d.nSites, d.nInd, nPop,d.genos,d.indF);
   double lnew = 1;
   #ifdef DO_MIS
   lnew = -like_tsk(*Q_new, *F_new,nThreads);
@@ -1245,7 +1295,7 @@ int emAccelThread(const bgl &d,int nPop,double **F,double **Q,double ***F_new,do
     fprintf(stderr,"bad guess in %s\n", __FUNCTION__);
     std::swap(*Q_new,Q_em2);
     std::swap(*F_new,F_em2);
-    // lnew = -likelihood(Q_new, F_new, d.nSites, d.nInd, nPop,d.genos);
+    // lnew = -likelihood(Q_new, F_new, d.nSites, d.nInd, nPop,d.genos,d.indF);
     lnew = -like_tsk(*Q_new, *F_new, nThreads);
     if ((alpha - stepMax) > -0.001)
       stepMax = std::max(stepMax0, stepMax/mstep);
@@ -1268,7 +1318,8 @@ void info(){
   fprintf(stderr,"\t-K Number of ancestral populations\n"); 
   fprintf(stderr,"Optional:\n");
   fprintf(stderr,"\t-fname Ancestral population frequencies\n"); 
-  fprintf(stderr,"\t-qname Admixture proportions\n"); 
+  fprintf(stderr,"\t-qname Admixture proportions\n");
+  fprintf(stderr,"\t-indF Individual inbreeding coefficients per individual\n");
   fprintf(stderr,"\t-outfiles Prefix for output files\n"); 
   fprintf(stderr,"\t-printInfo print ID and mean maf for the SNPs that were analysed\n"); 
 
@@ -1397,8 +1448,8 @@ void filterMinLrt(bgl &d,float minLrt){
   //  fprintf(stderr,"WARNING filtering minlrt=%f \n",minLrt);
   int posi =0;
   for(int s=0;s<d.nSites;s++){
-    float lik=likeFixedMinor(d.mafs[s],d.genos[s],d.nInd,d.keeps[s]);
-    float lik0=likeFixedMinor(0.0,d.genos[s],d.nInd,d.keeps[s]);
+    float lik=likeFixedMinor(d.mafs[s],d.genos[s],d.indF,d.nInd,d.keeps[s]);
+    float lik0=likeFixedMinor(0.0,d.genos[s],d.indF,d.nInd,d.keeps[s]);
     //    fprintf(stderr,"minlrt=%f mafs[%d]=%f lik=%f lik0=%f 2*(lik0-lik)=%f\n",minLrt,s,d.mafs[s],lik,lik0,2.0*(lik0-lik));
     if(2.0*(lik0-lik)>minLrt){
       d.genos[posi] = d.genos[s];
@@ -1439,6 +1490,7 @@ int main(int argc, char **argv){
   float minMaf =0.05;
   float minLrt =0;
   const char* lname = NULL;
+  const char* Fname = NULL;
   const char* fname = NULL;
   const char* qname = NULL;
   const char* outfiles = NULL;
@@ -1452,6 +1504,8 @@ int main(int argc, char **argv){
   while(*argv){
     if(strcmp(*argv,"-likes")==0 || strcmp(*argv,"-l")==0) lname=*++argv; 
     else if(strcmp(*argv,"-K")==0) nPop=atoi(*++argv); 
+    // to read individual inbreeding coefficients from file
+    else if(strcmp(*argv,"-indF")==0 || strcmp(*argv,"-F")==0) Fname=*++argv;
     // to read start values from output from previous run 
     else if(strcmp(*argv,"-fname")==0 || strcmp(*argv,"-f")==0) fname=*++argv; 
     else if(strcmp(*argv,"-qname")==0 || strcmp(*argv,"-q")==0) qname=*++argv;
@@ -1491,13 +1545,13 @@ int main(int argc, char **argv){
   FILE *flog=openFile(outfiles,".log");
   FILE *ffilter=openFile(outfiles,".filter");
 
-  fprintf(stderr,"Input: lname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,nPop,fname,qname,outfiles);
+  fprintf(stderr,"Input: lname=%s nPop=%d Fname=%s fname=%s qname=%s outfiles=%s\n",lname,nPop,Fname,fname,qname,outfiles);
   fprintf(stderr,"Setup: seed=%d nThreads=%d method=%d\n",seed,nThreads,method);
   fprintf(stderr,"Convergence: maxIter=%d tol=%f tolLike50=%f dymBound=%d\n",maxIter,tol,tolLike50,dymBound);
   fprintf(stderr,"Filters: misTol=%f minMaf=%f minLrt=%f minInd=%d\n",misTol,minMaf,minLrt,minInd);
 
 
-  fprintf(flog,"Input: lname=%s nPop=%d, fname=%s qname=%s outfiles=%s\n",lname,nPop,fname,qname,outfiles);
+  fprintf(flog,"Input: lname=%s nPop=%d Fname=%s fname=%s qname=%s outfiles=%s\n",lname,nPop,Fname,fname,qname,outfiles);
   fprintf(flog,"Setup: seed=%d nThreads=%d method=%d\n",seed,nThreads,method);
   fprintf(flog,"Convergence: maxIter=%d tol=%f tolLike50=%f dymBound=%d\n",maxIter,tol,tolLike50,dymBound);
   fprintf(flog,"Filters: misTol=%f minMaf=%f minLrt=%f minInd=%d\n",misTol,minMaf,minLrt,minInd);
@@ -1510,7 +1564,7 @@ int main(int argc, char **argv){
   clock_t t=clock();//how long time does the run take
   time_t t2=time(NULL);
   
-  bgl d=readBeagle(lname);
+  bgl d=readBeagle(lname, Fname);
   fprintf(stderr,"Input file has dim: nsites=%d nind=%d\n",d.nSites,d.nInd);
   fprintf(flog,"Input file has dim: nsites=%d nind=%d\n",d.nSites,d.nInd);
 
@@ -1536,12 +1590,11 @@ int main(int argc, char **argv){
   //set seed
   srand(seed);
   //unknown parameters
-  double **F =allocDouble(d.nSites,nPop);
-  double **Q =allocDouble(d.nInd,nPop);
-  double **F_new =allocDouble(d.nSites,nPop);
-  double **Q_new =allocDouble(d.nInd,nPop);
+  double **F = allocDouble(d.nSites,nPop);
+  double **Q = allocDouble(d.nInd,nPop);
+  double **F_new = allocDouble(d.nSites,nPop);
+  double **Q_new = allocDouble(d.nInd,nPop);
   
-
   //get start values
   if(fname==NULL){
     for(int j=0;j<d.nSites;j++)
@@ -1552,6 +1605,7 @@ int main(int argc, char **argv){
       }
   }else
     readDoubleGZ(F,d.nSites,nPop,fname,0);
+
   if(qname==NULL){
     for(int i=0;i<d.nInd;i++) {
       double sum=0;
@@ -1567,8 +1621,9 @@ int main(int argc, char **argv){
     }
   }else
     readDouble(Q,d.nInd,nPop,qname,0);
-  
-  //  double res =likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos);    
+
+
+  //  double res =likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos,d.indF);    
   //  fprintf(stderr,"startres=%f\n",res);
   //emsquare stuff beloq
   
@@ -1615,6 +1670,7 @@ int main(int argc, char **argv){
       myPars[i].genos=d.genos;
       myPars[i].nInd=d.nInd;
       myPars[i].nSites=d.nSites;
+      myPars[i].indF=d.indF;
     }
     //return 0;
     if(pthread_barrier_init(&barr, NULL, nThreads)){
@@ -1624,7 +1680,7 @@ int main(int argc, char **argv){
  
   }
   
-  double lold = -likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos);
+  double lold = -likelihood(Q, F, d.nSites, d.nInd, nPop, d.genos, d.indF);
   fprintf(stderr,"iter[start] like is=%f\n",lold);
   
   //below is the main looping trhought the iterations.
@@ -1637,7 +1693,7 @@ int main(int argc, char **argv){
   for(nit=1;SIG_COND&& nit<maxIter;nit++) {
     if(nThreads==1){
       if(method==0)//no acceleration
-	em(Q, F, d.nSites, d.nInd, nPop,d.genos,F_new,Q_new);
+	em(Q, F, d.nSites, d.nInd, nPop,d.genos,F_new,Q_new,d.indF);
       else{
 	if(emAccel(d,nPop,F,Q,&F_new,&Q_new,lold)==0){
 
@@ -1677,7 +1733,7 @@ int main(int argc, char **argv){
     std::swap(F,F_new);
     
     if((nit%50)==0 ){ //stopping criteria
-      double lik = likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos);
+      double lik = likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos,d.indF);
       // thres is largest differense in admixture fractions
       fprintf(stderr,"iter[%d] like is=%f thres=%f\n",nit,lik,calcThres(Q,Q_new,d.nInd,nPop));
       
@@ -1713,7 +1769,7 @@ int main(int argc, char **argv){
   }
   //  }
   if(nThreads==1)
-    lold = likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos);
+    lold = likelihood(Q, F, d.nSites, d.nInd, nPop,d.genos,d.indF);
   else
     lold = like_tsk(Q, F, nThreads);
   fprintf(stderr,"best like=%f after %d iterations\n",lold,nit);
@@ -1748,7 +1804,7 @@ int main(int argc, char **argv){
   delete [] myPars;
   
   if(nThreads==1){
-    em(NULL, NULL, 0, 0, 0,NULL,NULL,NULL);
+    em(NULL, NULL, 0, 0, 0,NULL,NULL,NULL,NULL);
   }
 
 
