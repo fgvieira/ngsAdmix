@@ -317,7 +317,7 @@ void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, i
 	    fpart += F[j][k] * Q[i][k];
 
 	  fpart=1-fpart;
-	  if(isnan(fpart))
+	  if(std::isnan(fpart))
 	    printf("WARNING: NaN found at Site %d and Ind %d\n", j, i);
 	  double pp0=fpart*fpart*        genos[j][3*i+0];
 	  double pp1=2*(1-fpart)*fpart*  genos[j][3*i+1];
@@ -341,7 +341,7 @@ void getExpGandFstar(double** Q, double** F, int nSites_start,int nSites_stop, i
 	sumBG[k] *= (1-F[j][k]);
 	F_1[j][k] = sumAG[k]/(sumAG[k]+sumBG[k]);
 
-	if(isnan(F_1[j][k]))
+	if(std::isnan(F_1[j][k]))
 	  printf("WARNING: NaN found at Site %d and K %d: %f %f (%f %f)\n", j, k, F[j][k], F_1[j][k], sumAG, sumBG);
       }
    }
@@ -406,7 +406,7 @@ void updateQ(double** Q_0, double** F_0, int* fixInd, int nSites_start, int nSit
       else
 	Q_1[i][k]=sumAGBG/(2*totSites);
 
-      if(isnan(Q_1[i][k]))
+      if(std::isnan(Q_1[i][k]))
 	printf("WARNING: NaN found at indiv %d and K %d (set as %d): %f %f (%f %f)\n", i, k, fixInd[i], Q_0[i][k], Q_1[i][k], prod1, prod2);
     }
   }
