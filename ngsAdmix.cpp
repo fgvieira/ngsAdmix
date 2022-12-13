@@ -630,11 +630,13 @@ int readPop(int* fixInd, int nInd, const char* pname){
       std::string buf_str = std::string(buf);
       // If new label, add it to MAP
       if (fixK.find(buf_str) == fixK.end())
-	fixK[buf_str] = fixK.size() - 1;
+	fixK[buf_str] = fixK.size();
 
       // Set indiv as fixed
       fixInd[i] = fixK[buf_str];
       n_fixInd++;
+
+      fprintf(stdout, "Sample %d assigned to cluster %d.\n", i, fixInd[i]);
     }
 
   fclose(fh);  /* close file */
